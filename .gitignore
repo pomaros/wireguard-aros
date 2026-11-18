@@ -1,0 +1,4 @@
+build/
+*.conf
+!aros/*.conf
+.DS_Store
