@@ -18,6 +18,7 @@
 #include <devices/sana2.h>
 #include <dos/dos.h>
 #include <dos/rdargs.h>
+#include <dos/var.h>
 #include <exec/memory.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
@@ -33,9 +34,9 @@
 #include <proto/bsdsocket.h>
 #include <proto/miami.h>
 
-#include <errno.h>
-#include <stdio.h>
-#include <string.h>
+
+#define printf wg_printf
+#define EEXIST 17 /* the stack's number for "the route exists" */
 
 #ifndef PF_ROUTE
 #define PF_ROUTE 17 /* the routing socket family of the BSD stack */
@@ -43,11 +44,11 @@
 
 #include <stdint.h>
 
+#include "wg_freestanding.h"
 #include "wg_config.h"
 #include "wireguard_device.h"
 
 #define IFACE "wg0"
-#define INTERFACES_FILE "ENV:AROSTCP/db/interfaces"
 #define STATE_FILE "ENV:WireGuard.state"
 #define CTRL_PORT "AROSTCP.ctrl"
 #define NCMD_RELOAD 1
@@ -189,11 +190,34 @@ static BOOL stack_reload(void) {
     return sent && msg.ncm_Result == 0;
 }
 
+/*
+ * The stack reads its interface list from the directory named by the
+ * variable AROSTCP/Config, or from the db drawer beside its program.
+ */
+static const char *interfaces_file(void) {
+    static char path[512];
+    static const char *const places[] = {"SYS:System/Network/AROSTCP/db/interfaces", "ENV:AROSTCP/db/interfaces", NULL};
+    BPTR lock;
+
+    if (GetVar("AROSTCP/Config", path, sizeof(path) - 16, GVF_GLOBAL_ONLY) > 0) {
+        AddPart(path, "interfaces", sizeof(path));
+        return path;
+    }
+    for (int i = 0; places[i]; i++) {
+        if ((lock = Lock((STRPTR)places[i], ACCESS_READ))) {
+            UnLock(lock);
+            return places[i];
+        }
+    }
+    return places[0];
+}
+
 /* Adds the wg0 line to the stack's interface list unless it is there, and has the stack read the list again. */
 static BOOL iface_create(void) {
     static const char line[] = IFACE " DEV=" WG_DEVICE_NAME " UNIT=0 NOTRACKING\n";
     static char text[8192];
-    BPTR fh = Open(INTERFACES_FILE, MODE_OLDFILE);
+    const char *file = interfaces_file();
+    BPTR fh = Open((STRPTR)file, MODE_OLDFILE);
     LONG len = 0;
     BOOL present = FALSE;
 
@@ -207,7 +231,7 @@ static BOOL iface_create(void) {
         present = strstr(text, "wireguard.device") != NULL;
     }
     if (!present) {
-        fh = Open(INTERFACES_FILE, MODE_READWRITE);
+        fh = Open((STRPTR)file, MODE_READWRITE);
         if (!fh) {
             return FALSE;
         }
@@ -275,16 +299,21 @@ static LONG route_change(int command, ULONG dst, ULONG mask, ULONG gateway, BOOL
     return result;
 }
 
-/* The gateway the stack would use to reach ip, or 0 when ip is on a directly attached network. */
-static ULONG route_gateway(ULONG ip) {
+#define ROUTE_NONE (-1)    /* the stack has no route to the address */
+#define ROUTE_DIRECT 0     /* the address is on an attached network */
+#define ROUTE_GATEWAY 1    /* reached through *gateway */
+
+/* How the stack reaches ip at this moment. */
+static int route_lookup(ULONG ip, ULONG *gateway) {
     static LONG seq = 1000;
     struct route_message m;
     char *cp = m.space;
     LONG s = socket(PF_ROUTE, SOCK_RAW, 0), n;
-    ULONG gateway = 0;
+    int result = ROUTE_NONE;
 
+    *gateway = 0;
     if (s < 0) {
-        return 0;
+        return ROUTE_NONE;
     }
     memset(&m, 0, sizeof(m));
     m.hdr.rtm_type = RTM_GET;
@@ -298,18 +327,22 @@ static ULONG route_gateway(ULONG ip) {
         do {
             n = recv(s, (char *)&m, sizeof(m), 0);
         } while (n > 0 && m.hdr.rtm_seq != seq);
-        if (n > 0 && m.hdr.rtm_errno == 0 && (m.hdr.rtm_flags & RTF_GATEWAY) && (m.hdr.rtm_addrs & RTA_GATEWAY)) {
-            struct sockaddr *sa = (struct sockaddr *)m.space;
-            if (m.hdr.rtm_addrs & RTA_DST) {
-                sa = (struct sockaddr *)((char *)sa + ROUNDUP(sa->sa_len));
-            }
-            if (sa->sa_family == AF_INET) {
-                gateway = ((struct sockaddr_in *)sa)->sin_addr.s_addr;
+        if (n > 0 && m.hdr.rtm_errno == 0) {
+            result = ROUTE_DIRECT;
+            if ((m.hdr.rtm_flags & RTF_GATEWAY) && (m.hdr.rtm_addrs & RTA_GATEWAY)) {
+                struct sockaddr *sa = (struct sockaddr *)m.space;
+                if (m.hdr.rtm_addrs & RTA_DST) {
+                    sa = (struct sockaddr *)((char *)sa + ROUNDUP(sa->sa_len));
+                }
+                if (sa->sa_family == AF_INET) {
+                    *gateway = ((struct sockaddr_in *)sa)->sin_addr.s_addr;
+                    result = ROUTE_GATEWAY;
+                }
             }
         }
     }
     CloseSocket(s);
-    return gateway;
+    return result;
 }
 
 /* ---- small helpers ---- */
@@ -438,7 +471,7 @@ static int command_up(const char *file, BOOL noroute, BOOL nodns) {
 
     if (!iface_exists(s)) {
         if (!iface_create() || !iface_exists(s)) {
-            printf("WireGuard: the stack did not take the interface " IFACE "; check " INTERFACES_FILE "\n");
+            printf("WireGuard: the stack did not take the interface " IFACE "; check %s\n", interfaces_file());
             goto out_socket;
         }
         printf("WireGuard: interface " IFACE " added to the stack\n");
@@ -465,7 +498,17 @@ static int command_up(const char *file, BOOL noroute, BOOL nodns) {
     }
 
     /* The endpoint keeps its present path before any route points into the tunnel. */
-    st.gateway = route_gateway(st.endpoint);
+    /* After the stack has read its configuration again, the default route comes back with the DHCP lease. */
+    {
+        int how = ROUTE_NONE;
+        for (int tries = 0; tries < 40 && (how = route_lookup(st.endpoint, &st.gateway)) == ROUTE_NONE; tries++) {
+            Delay(25);
+        }
+        if (how == ROUTE_NONE) {
+            printf("WireGuard: no route to the endpoint; is the network up?\n");
+            goto out_device;
+        }
+    }
     if (st.gateway && !noroute) {
         err = route_change(RTM_ADD, st.endpoint, 0xffffffffu, st.gateway, TRUE);
         if (err == 0) {
@@ -626,12 +669,19 @@ static int command_exitip(void) {
         return RETURN_FAIL;
     }
     body += 4;
-    body[strcspn(body, "\r\n ")] = 0;
+    for (char *end = body; ; end++) {
+        if (*end == '\r' || *end == '\n' || *end == ' ' || *end == 0) {
+            *end = 0;
+            break;
+        }
+    }
     printf("[WG] PASS exitip=%s resolved=1\n", body);
     return RETURN_OK;
 }
 
-int main(void) {
+WG_MAIN(wg_main)
+
+static int wg_main(void) {
     static const char template[] = "UP/S,DOWN/S,STATUS/S,EXITIP/S,FILE/K,NOROUTE/S,NODNS/S";
     IPTR args[7] = {0, 0, 0, 0, 0, 0, 0};
     struct RDArgs *rd = ReadArgs((STRPTR)template, args, NULL);

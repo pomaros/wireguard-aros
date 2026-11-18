@@ -37,6 +37,50 @@ needs no privileges. Its last line is a verdict:
 [WGPROBE] PASS handshake=1 handshake-ms=269 initiations=1 dns-reply=1 reply-ms=438 answers=1 name=example.com ...
 ```
 
+## Use on AROS
+
+Copy `wireguard.device` to `DEVS:Networks/` and `WireGuard` to `C:`. Then:
+
+```
+WireGuard UP FILE Work:my-tunnel.conf
+WireGuard STATUS
+WireGuard DOWN
+```
+
+`UP` adds the interface `wg0` to the TCP/IP stack if it is missing, gives it
+the tunnel's address, routes the `AllowedIPs` through it and sets the
+tunnel's DNS servers. The route to the endpoint stays on the gateway it had,
+so the encrypted packets do not enter the tunnel they carry. `NOROUTE` and
+`NODNS` leave routes or name servers alone. `DOWN` removes all of it and
+wipes the keys.
+
+To have the stack know `wg0` from boot, without the reload that `UP` needs
+the first time, add this line to its `db/interfaces`:
+
+```
+wg0 DEV=DEVS:Networks/wireguard.device UNIT=0 NOTRACKING
+```
+
+### How it fits AROS
+
+`wireguard.device` is a SANA-II device of the point-to-point kind, like a PPP
+driver: the stack opens it, writes IP packets to it and parks read requests
+on it. Its unit task owns a UDP socket on the same stack for the encrypted
+side. It needs AROSTCP and `entropy.resource`.
+
+## Build for AROS
+
+```sh
+aros/build.sh --sdk <build>/bin/<platform> --tools <build>/bin/darwin-aarch64/tools --crosstools <aros-crosstools>
+```
+
+This writes `build/aros/wireguard.device` and `build/aros/WireGuard`. The
+build is out of the AROS tree: it runs `genmodule` for the device and links
+the commands without the C library.
+
+`tests/aros/qemu-test.sh` boots a PomAROS QEMU image with the result and a
+real configuration file, and prints a verdict.
+
 ## Configuration
 
 The standard `wg-quick` file with one `[Interface]` and one `[Peer]`:

@@ -91,18 +91,32 @@ for symbol in WireGuard_5_WG_BeginIO WireGuard_6_WG_AbortIO WireGuard_ROMTag; do
 done
 echo "built $out/wireguard.device"
 
-if [ -f "$repo/aros/wg_command.c" ]; then
+# The commands: no C library, no SDK startup code. The object with the entry
+# point comes first on the link line.
+cc_cmd() { # source object extra-flags...
+    src=$1; o=$2; shift 2
     # shellcheck disable=SC2086
-    COMPILER_PATH="$tools:$crosstools/bin" "$clang" --target=aarch64-unknown-aros $arch -O2 -std=gnu11 \
-        -Wall -Wextra -Werror -Wno-unused-parameter -Wno-pointer-sign \
-        -isystem "$developer/include" -isystem "$generated" -isystem "$developer/include/aros/stdc" -isystem "$developer/include/aros/posixc" \
-        -I "$repo/aros" -I "$repo/src" -I "$repo/compat" -I "$core" \
-        -nostartfiles -nodefaultlibs -L "$developer/lib" -L "$crosstools/lib/generic" \
-        "$developer/lib/startup.o" "$repo/aros/wg_command.c" "$repo/src/wg_config.c" \
-        "$core/wireguard.c" "$core/crypto.c" "$core/crypto/refc/blake2s.c" "$core/crypto/refc/chacha20.c" \
-        "$core/crypto/refc/chacha20poly1305.c" "$core/crypto/refc/poly1305-donna.c" "$core/crypto/refc/x25519.c" \
-        -Wno-error -w -o "$out/WireGuard" \
-        -Wl,--allow-multiple-definition -Wl,--start-group -lstdc -lstdcio -ldos -lexec -laros -lautoinit -llibinit \
-        -lutility -lamiga -larossupport -Wl,--end-group -lclang_rt.builtins-aarch64
-    echo "built $out/WireGuard"
-fi
+    "$clang" --target=aarch64-unknown-none-elf $arch $common $inc "$@" -c "$src" -o "$o"
+}
+link_cmd() { # output objects...
+    o=$1; shift
+    # shellcheck disable=SC2086
+    PATH="$tools:$PATH" COMPILER_PATH="$crosstools/bin" "$clang" --target=aarch64-unknown-aros $arch \
+        -nostartfiles -nodefaultlibs -Wl,--allow-multiple-definition -L "$developer/lib" -L "$crosstools/lib/generic" \
+        -o "$o" "$@" -Wl,--start-group -lamiga -larossupport -laros -lexec -Wl,--end-group -lclang_rt.builtins-aarch64
+    undefined=$("$nm" --undefined-only "$o" | grep -E '[^[:space:]]' || true)
+    [ -z "$undefined" ] || { echo "unresolved symbols in $o:" >&2; echo "$undefined" >&2; exit 65; }
+    echo "built $o"
+}
+strict="-Wall -Wextra -Werror -Wno-unused-parameter -Wno-pointer-sign"
+cc_cmd "$repo/aros/wg_command.c" "$obj/cmd_main.o" $strict
+cc_cmd "$repo/aros/wg_printf.c" "$obj/cmd_printf.o" $strict
+cc_cmd "$repo/aros/wg_ministring.c" "$obj/cmd_string.o" $strict
+cc_cmd "$repo/src/wg_config.c" "$obj/cmd_config.o" $strict
+cc_cmd "$core/wireguard.c" "$obj/cmd_core.o" -w
+cc_cmd "$core/crypto.c" "$obj/cmd_crypto.o" -w
+link_cmd "$out/WireGuard" "$obj/cmd_main.o" "$obj/cmd_printf.o" "$obj/cmd_string.o" "$obj/cmd_config.o" \
+    "$obj/cmd_core.o" "$obj/cmd_crypto.o" "$obj/core_blake2s.o" "$obj/core_chacha20.o" \
+    "$obj/core_chacha20poly1305.o" "$obj/core_poly1305-donna.o" "$obj/core_x25519.o"
+cc_cmd "$repo/tests/aros/runscript.c" "$obj/runscript.o" $strict
+link_cmd "$out/RunScript" "$obj/runscript.o"

@@ -11,7 +11,6 @@
  * without taking the base lock. And closing the last opener never waits for
  * the task: the task owns the unit and frees it when it ends.
  */
-#include <aros/debug.h>
 #include <aros/libcall.h>
 #include <aros/symbolsets.h>
 #include <devices/newstyle.h>
@@ -33,6 +32,14 @@ static const UWORD supported_commands[] = {
     CMD_READ, CMD_WRITE, S2_DEVICEQUERY, S2_GETSTATIONADDRESS, S2_CONFIGINTERFACE, S2_BROADCAST,
     S2_TRACKTYPE, S2_UNTRACKTYPE, S2_GETGLOBALSTATS, S2_ONEVENT, S2_ONLINE, S2_OFFLINE,
     NSCMD_DEVICEQUERY, WGCMD_SETCONFIG, WGCMD_GETSTATUS, WGCMD_CLEAR, 0};
+
+void wg_log(const char *text) {
+    /* RawPutChar goes to the serial console. The formatted debug output of
+     * exec depends on a debug library that a release system may not have. */
+    while (*text) {
+        RawPutChar(*text++);
+    }
+}
 
 static void wipe(void *p, ULONG n) {
     volatile UBYTE *b = p;
@@ -97,10 +104,15 @@ static struct WGUnit *unit_create(LIBBASETYPEPTR base) {
             /* The task sends start_msg once its ports and signals exist, or with write_port NULL on failure. */
             WaitPort(unit->sync_port);
             GetMsg(unit->sync_port);
+            /* The port's signal belongs to this task, the opener, so it is freed here. */
+            DeleteMsgPort(unit->sync_port);
+            unit->sync_port = NULL;
             if (unit->write_port) {
                 return unit;
             }
             /* The task failed to start and has ended; it left the unit to us. */
+            FreeMem(unit, sizeof(*unit));
+            return NULL;
         } else {
             base->tasks_alive--;
         }
@@ -140,7 +152,7 @@ static int WG_Open(LIBBASETYPEPTR base, struct IOSana2Req *req, ULONG unitnum, U
             return FALSE;
         }
         base->unit = unit;
-        D(bug("[wireguard] unit task started\n"));
+        wg_log("[wireguard] unit task started\n");
     }
     Disable();
     AddTail((struct List *)&unit->openers, (struct Node *)opener);
@@ -189,7 +201,7 @@ static int WG_Close(LIBBASETYPEPTR base, struct IOSana2Req *req) {
         base->unit = NULL;
         /* The task replies queued writes, frees the unit and ends. Nobody waits for it. */
         Signal(unit->task, 1UL << unit->stop_signal);
-        D(bug("[wireguard] last opener closed, unit task told to stop\n"));
+        wg_log("[wireguard] last opener closed, unit task told to stop\n");
     }
     return TRUE;
 }

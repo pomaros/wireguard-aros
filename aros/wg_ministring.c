@@ -61,3 +61,59 @@ size_t strlen(const char *s) {
     }
     return n;
 }
+
+char *strcpy(char *dst, const char *src) {
+    char *d = dst;
+
+    while ((*d++ = *src++)) {
+    }
+    return dst;
+}
+
+char *strchr(const char *s, int c) {
+    for (;; s++) {
+        if (*s == (char)c) {
+            return (char *)s;
+        }
+        if (!*s) {
+            return NULL;
+        }
+    }
+}
+
+char *strrchr(const char *s, int c) {
+    const char *last = NULL;
+
+    for (;; s++) {
+        if (*s == (char)c) {
+            last = s;
+        }
+        if (!*s) {
+            return (char *)last;
+        }
+    }
+}
+
+int strncmp(const char *a, const char *b, size_t n) {
+    for (; n--; a++, b++) {
+        if (*a != *b || !*a) {
+            return (unsigned char)*a - (unsigned char)*b;
+        }
+    }
+    return 0;
+}
+
+int strcmp(const char *a, const char *b) {
+    return strncmp(a, b, (size_t)-1);
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    size_t n = strlen(needle);
+
+    for (; *haystack; haystack++) {
+        if (strncmp(haystack, needle, n) == 0) {
+            return (char *)haystack;
+        }
+    }
+    return n == 0 ? (char *)haystack : NULL;
+}

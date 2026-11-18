@@ -61,5 +61,7 @@ struct WGUnit {
 };
 
 void wg_unit_task(struct WGBase *base, struct WGUnit *unit);
+/* Writes a line to the kernel's debug output. */
+void wg_log(const char *text);
 
 #endif

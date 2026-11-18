@@ -11,7 +11,6 @@
  * shuts down it breaks this task with CTRL-C and waits for the base to be
  * closed, so the task lets go of the socket and keeps running without one.
  */
-#include <aros/debug.h>
 #include <devices/timer.h>
 #include <dos/dos.h>
 #include <exec/errors.h>
@@ -106,13 +105,21 @@ bool wireguard_is_under_load(void) {
 /* ---- the socket ---- */
 
 static BOOL stack_is_up(void) {
-    struct Node *lib;
+    struct MsgPort *port;
 
-    /* OpenLibrary would go to disk for a missing library, which a plain task must not do. */
+    /*
+     * OpenLibrary would go to disk for a library that is not in memory, which
+     * a plain task must not do. The stack's control port says it is running;
+     * the port is looked up by name so that no ExecBase field is read here,
+     * since the layout of that structure differs between AROS builds.
+     */
     Forbid();
-    lib = FindName(&SysBase->LibList, "bsdsocket.library");
+    port = FindPort("AROSTCP.ctrl");
+    if (!port) {
+        port = FindPort("AROSTCP");
+    }
     Permit();
-    return lib != NULL;
+    return port != NULL;
 }
 
 static void socket_close(struct wg_run *run) {
@@ -164,7 +171,7 @@ static void socket_open(struct wg_run *run) {
     IoctlSocket(run->sock, FIONBIO, (char *)&on);
     run->socket_state = WG_SOCKET_OPEN;
     run->socket_errno = 0;
-    D(bug("[wireguard] UDP socket open\n"));
+    wg_log("[wireguard] UDP socket open\n");
 }
 
 static int udp_send(void *ctx, const uint8_t *data, size_t len, uint32_t ip, uint16_t port) {
@@ -310,14 +317,14 @@ static void apply_config(struct wg_run *run) {
     run->socket_held = FALSE;
     socket_close(run);
     if (!valid) {
-        D(bug("[wireguard] configuration cleared\n"));
+        wg_log("[wireguard] configuration cleared\n");
         return;
     }
     if (!EntropyBase) {
         EntropyBase = OpenResource("entropy.resource");
     }
     if (!EntropyBase) {
-        bug("[wireguard] no entropy.resource: refusing to make keys\n");
+        wg_log("[wireguard] no entropy.resource: refusing to make keys\n");
         tunnel_stop(run);
         return;
     }
@@ -325,7 +332,7 @@ static void apply_config(struct wg_run *run) {
         wg_tunnel_add_peer(&run->tunnel, run->config.public_key,
                            run->config.has_preshared_key ? run->config.preshared_key : NULL, run->config.endpoint_ip,
                            run->config.endpoint_port, run->config.keepalive, &index) != WG_OK) {
-        bug("[wireguard] the configuration was refused\n");
+        wg_log("[wireguard] the configuration was refused\n");
         tunnel_stop(run);
         return;
     }
@@ -334,7 +341,7 @@ static void apply_config(struct wg_run *run) {
     }
     wg_tunnel_connect(&run->tunnel, index);
     run->tunnel_ready = TRUE;
-    D(bug("[wireguard] configuration applied, connecting\n"));
+    wg_log("[wireguard] configuration applied, connecting\n");
 }
 
 static void publish_status(struct wg_run *run) {
@@ -442,7 +449,7 @@ void wg_unit_task(struct WGBase *base, struct WGUnit *unit) {
             /* The stack is shutting down and waits for every socket base to close. */
             socket_close(run);
             run->socket_held = TRUE;
-            D(bug("[wireguard] stack shutting down, socket released\n"));
+            wg_log("[wireguard] stack shutting down, socket released\n");
         }
         if (got & (1UL << config_signal)) {
             apply_config(run);
@@ -478,12 +485,11 @@ void wg_unit_task(struct WGBase *base, struct WGUnit *unit) {
     }
     DeleteMsgPort(write_port);
     DeleteMsgPort(timer_port);
-    DeleteMsgPort(unit->sync_port);
     FreeSignal(stop_signal);
     FreeSignal(config_signal);
     FreeMem(run, sizeof(*run));
     FreeMem(unit, sizeof(*unit));
-    D(bug("[wireguard] unit task ended\n"));
+    wg_log("[wireguard] unit task ended\n");
     Forbid();
     base->tasks_alive--;
 }
